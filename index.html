@@ -428,7 +428,7 @@
   <div id="access-gate-root" class="access-gate-root" hidden></div>
   <div id="modal-root"></div>
   <script>
-    (() => {
+    (async () => {
       const CHECKLIST_PASSWORD = '1679';
       const EMERGENCY_ADMIN_PASSWORD = '1679';
       const FINAL_ADMIN_PASSWORD = '2024';
@@ -439,6 +439,8 @@
       const SESSION_ROLE_KEY = 'stayops-session-role-v1';
       const BACKUP_KEY = 'stayops-property-calendar-auto-backup-v1';
       const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+      let backendAvailable = false;
+      let remoteSaveTimer = null;
       const linenItems = [
         ['duvetLarge','大被罩','掛け布団カバー（大）'],
         ['duvetSmall','小被罩','掛け布団カバー（小）'],
@@ -544,7 +546,20 @@
         ];
         return {rooms,reservations,manualEvents:[],eventMeta,checklists,supplies:{},supplyTranslations:{},scheduleMeta:{},scheduleMonth:today.slice(0,7),scheduleEmployeeFilter:'all',feedUrls:{},otherExpenses:{},profitMonth:today.slice(0,7),viewStart:addDays(today,-1),calendarEnd:addDays(today,5),activeView:'calendar',role:'locked',accessRole:'cleaner',language:'ja',staffRooms:rooms.map(room => room.id),staffAccounts,activeStaffId:'staff-ny1',adminPassword:DEFAULT_ADMIN_PASSWORD,auth:{admin:{failedAttempts:0,locked:false},operations:{failedAttempts:0,locked:false},staff:{}},accountingStart:today,accountingEnd:addDays(today,30),roomFilter:'all'};
       }
-      let state = (() => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || seedState(); } catch { return seedState(); } })();
+      const localState = (() => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || seedState(); } catch { return seedState(); } })();
+      let state = localState;
+      try {
+        const response = await fetch('/api/state', {headers:{accept:'application/json'}});
+        if (response.ok) {
+          const remote = await response.json();
+          backendAvailable = true;
+          if (remote && Array.isArray(remote.rooms) && Array.isArray(remote.reservations)) {
+            const localOnly = ['language','activeView','roomFilter','viewStart','calendarEnd','activeStaffId','accountingStart','accountingEnd','profitMonth','scheduleMonth','scheduleEmployeeFilter'];
+            const preferences = Object.fromEntries(localOnly.map(key => [key, localState[key]]));
+            state = {...remote,...preferences};
+          }
+        }
+      } catch {}
       state.language = state.language || 'ja';
       state.staffRooms = Array.isArray(state.staffRooms) ? state.staffRooms : state.rooms.map(room => room.id);
       state.staffAccounts = Array.isArray(state.staffAccounts) && state.staffAccounts.length ? state.staffAccounts : seedState().staffAccounts;
@@ -709,7 +724,19 @@
           return state.language === 'ja' ? '自動バックアップ状態を確認できません' : '无法读取自动备份状态';
         }
       }
-      function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); writeAutoBackup(); }
+      function sharedStatePayload() {
+        const payload = JSON.parse(JSON.stringify(state));
+        ['role','accessRole','language','activeView','roomFilter','viewStart','calendarEnd','activeStaffId','accountingStart','accountingEnd','profitMonth','scheduleMonth','scheduleEmployeeFilter'].forEach(key => delete payload[key]);
+        return payload;
+      }
+      function queueRemoteSave() {
+        if (!backendAvailable) return;
+        clearTimeout(remoteSaveTimer);
+        remoteSaveTimer = setTimeout(() => {
+          fetch('/api/state', {method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(sharedStatePayload())}).catch(() => {});
+        }, 250);
+      }
+      function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); writeAutoBackup(); queueRemoteSave(); }
       function downloadBackup() {
         const blob = new Blob([JSON.stringify(backupPayload(), null, 2)], {type:'application/json;charset=utf-8'});
         const url = URL.createObjectURL(blob);
@@ -1763,7 +1790,8 @@
       function fetchWithTimeout(url, timeoutMs = 7000) {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
-        return fetch(url, {signal:controller.signal}).finally(() => clearTimeout(timer));
+        const target = backendAvailable ? '/api/ical?url=' + encodeURIComponent(url) : url;
+        return fetch(target, {signal:controller.signal}).finally(() => clearTimeout(timer));
       }
       async function syncRoomCalendars(roomId) {
         if (state.role !== 'admin') return;
@@ -2048,6 +2076,7 @@
       document.getElementById('today-btn').addEventListener('click',()=>{const length=calendarRangeLength();state.viewStart=addDays(today,-1);state.calendarEnd=addDays(state.viewStart,length-1);save();render();});
       document.getElementById('add-room').addEventListener('click',()=>openAddRoom());
       writeAutoBackup();
+      if (backendAvailable) queueRemoteSave();
       render();
     })();
   </script>
